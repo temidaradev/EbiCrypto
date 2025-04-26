@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -81,6 +82,22 @@ type Game struct {
 	deviceScale        float64
 	SelectedCoinIndex  int
 	solidColorImage    *ebiten.Image
+
+	// Topbar fields
+	topbarHeight   float64
+	dropdowns      []*Dropdown
+	activeDropdown *Dropdown
+	chartType      string // "line" or "candle"
+	timeline       string // "1h", "4h", "1d", "1w"
+}
+
+type Dropdown struct {
+	Label    string
+	Options  []string
+	IsOpen   bool
+	Bounds   image.Rectangle
+	Selected int
+	OnSelect func(int)
 }
 
 func init() {
@@ -246,83 +263,208 @@ func initCoinData(loadedData AppData) []*CoinInfo {
 	}
 }
 
-func (g *Game) Draw(screen *ebiten.Image) {
-	g.initSolidColorImage()
+func (g *Game) initTopbar() {
+	topbarHeight := 38.0 * g.deviceScale
+	g.topbarHeight = topbarHeight
+	g.chartType = "line"
+	g.timeline = "1h"
 
-	screen.Fill(color.RGBA{25, 25, 25, 255})
+	// Compact pill-shaped dropdowns with spacing
+	margin := 12
+	btnW := 80
+	btnH := int(topbarHeight) - 10
+	g.dropdowns = []*Dropdown{
+		{
+			Label:   "Crypto",
+			Options: targetSymbols,
+			Bounds:  image.Rect(margin, 5, margin+btnW, 5+btnH),
+			OnSelect: func(index int) {
+				g.mu.Lock()
+				g.SelectedCoinIndex = index
+				g.mu.Unlock()
+			},
+		},
+		{
+			Label:   "Chart",
+			Options: []string{"Line", "Candle"},
+			Bounds:  image.Rect(margin+btnW+margin, 5, margin+btnW*2+margin, 5+btnH),
+			OnSelect: func(index int) {
+				g.mu.Lock()
+				if index == 0 {
+					g.chartType = "line"
+				} else {
+					g.chartType = "candle"
+				}
+				g.mu.Unlock()
+			},
+		},
+		{
+			Label:   "Time",
+			Options: []string{"1h", "4h", "1d", "1w"},
+			Bounds:  image.Rect(margin+btnW*2+margin*2, 5, margin+btnW*3+margin*2, 5+btnH),
+			OnSelect: func(index int) {
+				g.mu.Lock()
+				g.timeline = g.dropdowns[2].Options[index]
+				g.mu.Unlock()
+			},
+		},
+	}
+}
 
-	physicalStartX := 10.0 * g.deviceScale
-	physicalStartY := 10.0 * g.deviceScale
-	physicalLineHeight := g.physicalLineHeight
-
-	screenWidth, screenHeight := screen.Size()
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	listHeight := physicalLineHeight * float64(len(g.coinData))
-	chartAreaStartY := listHeight + physicalStartY + (20.0 * g.deviceScale)
-
-	for i, coin := range g.coinData {
-		physicalDrawY := physicalStartY + float64(i)*physicalLineHeight
-		physicalDrawX := physicalStartX
-
-		txtColor := color.RGBA{255, 255, 255, 255}
-		if coin.PreviousPrice != "" && coin.LastPrice != "" {
-			prev, prevErr := strconv.ParseFloat(coin.PreviousPrice, 64)
-			last, lastErr := strconv.ParseFloat(coin.LastPrice, 64)
+func (g *Game) drawTopbar(screen *ebiten.Image) {
+	screenWidth, _ := screen.Size()
+	// Topbar background
+	vector.DrawFilledRect(screen, 0, 0, float32(screenWidth), float32(g.topbarHeight), color.RGBA{28, 28, 28, 255}, false)
+	// Draw dropdowns
+	for _, dropdown := range g.dropdowns {
+		// Pill background
+		pillColor := color.RGBA{44, 44, 44, 255}
+		if dropdown.IsOpen {
+			pillColor = color.RGBA{60, 60, 60, 255}
+		}
+		vector.DrawFilledRect(screen, float32(dropdown.Bounds.Min.X), float32(dropdown.Bounds.Min.Y),
+			float32(dropdown.Bounds.Dx()), float32(dropdown.Bounds.Dy()), pillColor, false)
+		// Subtle shadow
+		vector.StrokeRect(screen, float32(dropdown.Bounds.Min.X), float32(dropdown.Bounds.Min.Y),
+			float32(dropdown.Bounds.Dx()), float32(dropdown.Bounds.Dy()), 1.5, color.RGBA{80, 80, 80, 80}, false)
+		// Value + icon (no label prefix)
+		value := dropdown.Options[dropdown.Selected]
+		icon := " ▼"
+		esset.DrawText(screen, value+icon, 0, float64(dropdown.Bounds.Min.X+14), float64(dropdown.Bounds.Min.Y+6), g.fontFace, color.RGBA{220, 220, 220, 255})
+		// Dropdown options
+		if dropdown.IsOpen {
+			optionHeight := int(g.physicalLineHeight * 0.85)
+			dropdownWidth := dropdown.Bounds.Dx()
+			optionsHeight := optionHeight * len(dropdown.Options)
+			vector.DrawFilledRect(screen, float32(dropdown.Bounds.Min.X), float32(dropdown.Bounds.Max.Y+2),
+				float32(dropdownWidth), float32(optionsHeight), color.RGBA{38, 38, 38, 255}, false)
+			for i, option := range dropdown.Options {
+				optionY := dropdown.Bounds.Max.Y + 2 + (i * optionHeight)
+				optionRect := image.Rect(dropdown.Bounds.Min.X, optionY, dropdown.Bounds.Min.X+dropdownWidth, optionY+optionHeight)
+				if i == dropdown.Selected {
+					vector.DrawFilledRect(screen, float32(optionRect.Min.X), float32(optionRect.Min.Y),
+						float32(optionRect.Dx()), float32(optionRect.Dy()), color.RGBA{60, 60, 60, 255}, false)
+				}
+				esset.DrawText(screen, option, 0, float64(optionRect.Min.X+14), float64(optionRect.Min.Y+6), g.fontFace, color.White)
+			}
+		}
+	}
+	// Draw price info, small and right-aligned
+	if g.SelectedCoinIndex >= 0 && g.SelectedCoinIndex < len(g.coinData) {
+		selectedCoin := g.coinData[g.SelectedCoinIndex]
+		priceInfo := fmt.Sprintf("%s: %s", selectedCoin.Symbol, selectedCoin.LastPrice)
+		priceColor := color.RGBA{255, 255, 255, 255}
+		if selectedCoin.PreviousPrice != "" && selectedCoin.LastPrice != "" {
+			prev, prevErr := strconv.ParseFloat(selectedCoin.PreviousPrice, 64)
+			last, lastErr := strconv.ParseFloat(selectedCoin.LastPrice, 64)
 			if prevErr == nil && lastErr == nil {
 				if last > prev {
-					txtColor = color.RGBA{0, 255, 0, 255}
+					priceColor = color.RGBA{0, 255, 0, 255}
 				} else if last < prev {
-					txtColor = color.RGBA{255, 0, 0, 255}
+					priceColor = color.RGBA{255, 0, 0, 255}
+				}
+			}
+		}
+		esset.DrawText(screen, priceInfo, 0, float64(screenWidth-170), 10, g.fontFace, priceColor)
+	}
+}
+
+func (g *Game) handleTopbarInput() {
+	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+		mx, my := ebiten.CursorPosition()
+
+		// Check if clicking on any dropdown
+		for _, dropdown := range g.dropdowns {
+			// Check if clicking dropdown button
+			if mx >= dropdown.Bounds.Min.X && mx < dropdown.Bounds.Max.X &&
+				my >= dropdown.Bounds.Min.Y && my < dropdown.Bounds.Max.Y {
+				dropdown.IsOpen = !dropdown.IsOpen
+				if dropdown.IsOpen {
+					g.activeDropdown = dropdown
+				} else if g.activeDropdown == dropdown {
+					g.activeDropdown = nil
+				}
+				return
+			}
+
+			// Check if clicking on open dropdown options
+			if dropdown.IsOpen {
+				optionHeight := int(g.physicalLineHeight)
+				dropdownWidth := dropdown.Bounds.Dx()
+				optionsHeight := optionHeight * len(dropdown.Options)
+
+				if mx >= dropdown.Bounds.Min.X && mx < dropdown.Bounds.Min.X+dropdownWidth &&
+					my >= dropdown.Bounds.Max.Y && my < dropdown.Bounds.Max.Y+optionsHeight {
+					optionIndex := (my - dropdown.Bounds.Max.Y) / optionHeight
+					if optionIndex >= 0 && optionIndex < len(dropdown.Options) {
+						dropdown.Selected = optionIndex
+						if dropdown.OnSelect != nil {
+							dropdown.OnSelect(optionIndex)
+						}
+						dropdown.IsOpen = false
+						g.activeDropdown = nil
+					}
+					return
 				}
 			}
 		}
 
-		esset.DrawText(screen, coin.DisplayStr, 0, physicalDrawX, physicalDrawY, g.fontFace, txtColor)
+		// Close any open dropdown if clicking elsewhere
+		if g.activeDropdown != nil {
+			g.activeDropdown.IsOpen = false
+			g.activeDropdown = nil
+		}
+	}
+}
+
+func (g *Game) Draw(screen *ebiten.Image) {
+	g.initSolidColorImage()
+
+	screen.Fill(color.RGBA{22, 22, 22, 255})
+	g.drawTopbar(screen)
+
+	chartPadding := 32.0 * g.deviceScale
+	chartTop := g.topbarHeight + chartPadding
+	chartLeft := chartPadding
+	screenWidth, screenHeight := screen.Size()
+	chartWidth := float64(screenWidth) - chartPadding*2
+	chartHeight := float64(screenHeight) - chartTop - chartPadding
+
+	// Card-like chart area
+	vector.DrawFilledRect(screen, float32(chartLeft), float32(chartTop), float32(chartWidth), float32(chartHeight), color.RGBA{38, 38, 38, 255}, false)
+	vector.StrokeRect(screen, float32(chartLeft), float32(chartTop), float32(chartWidth), float32(chartHeight), 2, color.RGBA{60, 60, 60, 255}, false)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// Chart title
+	if g.SelectedCoinIndex >= 0 && g.SelectedCoinIndex < len(g.coinData) {
+		selectedCoin := g.coinData[g.SelectedCoinIndex]
+		chartTitle := fmt.Sprintf("%s %s Chart (%s)", selectedCoin.Symbol, strings.Title(g.chartType), g.timeline)
+		esset.DrawText(screen, chartTitle, 0, chartLeft+12, chartTop-28, g.fontFace, color.RGBA{180, 180, 180, 255})
 	}
 
-	if g.SelectedCoinIndex != -1 && len(g.coinData) > g.SelectedCoinIndex {
+	// Draw grid lines and axis labels
+	gridLines := 6
+	for i := 0; i <= gridLines; i++ {
+		// Horizontal grid
+		gy := chartTop + (chartHeight*float64(i))/float64(gridLines)
+		vector.StrokeLine(screen, float32(chartLeft), float32(gy), float32(chartLeft+chartWidth), float32(gy), 1, color.RGBA{60, 60, 60, 128}, false)
+	}
+	for i := 0; i <= gridLines; i++ {
+		// Vertical grid
+		gx := chartLeft + (chartWidth*float64(i))/float64(gridLines)
+		vector.StrokeLine(screen, float32(gx), float32(chartTop), float32(gx), float32(chartTop+chartHeight), 1, color.RGBA{60, 60, 60, 128}, false)
+	}
+
+	// Draw chart data
+	if g.SelectedCoinIndex >= 0 && g.SelectedCoinIndex < len(g.coinData) {
 		selectedCoin := g.coinData[g.SelectedCoinIndex]
 		history := selectedCoin.PriceHistory
-
-		chartPadding := 30.0 * g.deviceScale
-		chartRect := image.Rect(
-			int(chartPadding),
-			int(chartAreaStartY),
-			screenWidth-int(chartPadding),
-			screenHeight-int(chartPadding),
-		)
-
-		vector.DrawFilledRect(screen, float32(chartRect.Min.X), float32(chartRect.Min.Y), float32(chartRect.Dx()), float32(chartRect.Dy()), color.RGBA{50, 50, 50, 255}, false)
-
-		selectedSymbolText := selectedCoin.Symbol
-		symbolColor := color.RGBA{200, 200, 200, 255}
-		symbolTextWidth, symbolTextHeight := text.Measure(selectedSymbolText, g.fontFace, -1)
-
-		symbolDrawX := float64(chartRect.Min.X) + (float64(chartRect.Dx())-symbolTextWidth)/2.0
-		symbolDrawY := float64(chartRect.Min.Y) - (symbolTextHeight + (5.0 * g.deviceScale))
-
-		esset.DrawText(screen, selectedSymbolText, 0, symbolDrawX, symbolDrawY, g.fontFace, symbolColor)
-
-		maxPointsToDisplay := chartRect.Dx()
-		if maxPointsToDisplay < 100 {
-			maxPointsToDisplay = 100
-		}
-		if maxPointsToDisplay > 1000 {
-			maxPointsToDisplay = 1000
-		}
-
-		displayHistory := history
-		if len(history) > maxPointsToDisplay {
-			displayHistory = history[len(history)-maxPointsToDisplay:]
-		}
-
-		if len(displayHistory) > 1 {
-			minPrice := displayHistory[0].Price
-			maxPrice := displayHistory[0].Price
-			for _, pp := range displayHistory {
+		if len(history) > 0 {
+			minPrice := history[0].Price
+			maxPrice := history[0].Price
+			for _, pp := range history {
 				if pp.Price < minPrice {
 					minPrice = pp.Price
 				}
@@ -330,87 +472,54 @@ func (g *Game) Draw(screen *ebiten.Image) {
 					maxPrice = pp.Price
 				}
 			}
-
 			priceRange := maxPrice - minPrice
 			if priceRange == 0 {
 				priceRange = 1.0
 				minPrice -= 0.001
 				maxPrice += 0.001
 			}
-
-			path := &vector.Path{}
-
-			firstPP := displayHistory[0]
-			startX := float64(chartRect.Min.X)
-			startY := float64(chartRect.Max.Y) - ((firstPP.Price-minPrice)/priceRange)*float64(chartRect.Dy())
-			path.MoveTo(float32(startX), float32(startY))
-
-			for i := 1; i < len(displayHistory); i++ {
-				pp1 := displayHistory[i-1]
-				pp2 := displayHistory[i]
-
-				timeDiff := pp2.Timestamp.Sub(pp1.Timestamp)
-
-				chartX := float64(chartRect.Min.X) + (float64(i)/float64(len(displayHistory)-1))*(float64(chartRect.Dx()))
-				chartY := float64(chartRect.Max.Y) - ((pp2.Price-minPrice)/priceRange)*float64(chartRect.Dy())
-
-				if timeDiff > historyGapThreshold {
-					path.MoveTo(float32(chartX), float32(chartY))
-				} else {
-					path.LineTo(float32(chartX), float32(chartY))
+			// Draw price axis labels
+			for i := 0; i <= gridLines; i++ {
+				price := minPrice + (priceRange*float64(gridLines-i))/float64(gridLines)
+				gy := chartTop + (chartHeight*float64(i))/float64(gridLines)
+				label := fmt.Sprintf("%.2f", price)
+				esset.DrawText(screen, label, 0, chartLeft-60, gy-8, g.fontFace, color.RGBA{180, 180, 180, 255})
+			}
+			// Draw time axis labels (start/end)
+			if len(history) > 1 {
+				startTime := history[0].Timestamp.Format("15:04")
+				endTime := history[len(history)-1].Timestamp.Format("15:04")
+				esset.DrawText(screen, startTime, 0, chartLeft, chartTop+chartHeight+8, g.fontFace, color.RGBA{180, 180, 180, 255})
+				esset.DrawText(screen, endTime, 0, chartLeft+chartWidth-40, chartTop+chartHeight+8, g.fontFace, color.RGBA{180, 180, 180, 255})
+			}
+			// Draw chart line or candles
+			if g.chartType == "line" {
+				path := &vector.Path{}
+				for i, pp := range history {
+					x := chartLeft + (float64(i)/float64(len(history)-1))*chartWidth
+					y := chartTop + chartHeight - ((pp.Price-minPrice)/priceRange)*chartHeight
+					if i == 0 {
+						path.MoveTo(float32(x), float32(y))
+					} else {
+						path.LineTo(float32(x), float32(y))
+					}
+				}
+				vs, is := path.AppendVerticesAndIndicesForStroke(nil, nil, &vector.StrokeOptions{
+					Width: 2.5 * float32(g.deviceScale),
+				})
+				op := &ebiten.DrawTrianglesOptions{}
+				op.ColorM.Scale(0, 200.0/255.0, 255.0/255.0, 1)
+				screen.DrawTriangles(vs, is, g.solidColorImage, op)
+			} else {
+				// Candlestick: draw as vertical bars for now
+				candleW := chartWidth / float64(len(history))
+				for i, pp := range history {
+					x := chartLeft + float64(i)*candleW
+					y := chartTop + chartHeight - ((pp.Price-minPrice)/priceRange)*chartHeight
+					vector.DrawFilledRect(screen, float32(x), float32(y-8), float32(candleW*0.7), 16, color.RGBA{0, 200, 255, 255}, false)
 				}
 			}
-
-			vs, is := path.AppendVerticesAndIndicesForStroke(nil, nil, &vector.StrokeOptions{
-				Width: 2.0 * float32(g.deviceScale),
-			})
-
-			op := &ebiten.DrawTrianglesOptions{}
-			op.ColorM.Scale(0, 200.0/255.0, 255.0/255.0, 1)
-
-			screen.DrawTriangles(vs, is, g.solidColorImage, op)
-
-			if len(displayHistory) > 0 {
-				lastPP := displayHistory[len(displayHistory)-1]
-				chartX := float64(chartRect.Max.X)
-				chartY := float64(chartRect.Max.Y) - ((lastPP.Price-minPrice)/priceRange)*float64(chartRect.Dy())
-				vector.DrawFilledCircle(screen, float32(chartX), float32(chartY), 3.0*float32(g.deviceScale), color.RGBA{255, 255, 0, 255}, false)
-			}
-		} else if len(displayHistory) == 1 {
-			pp := displayHistory[0]
-			minPrice := pp.Price - 0.001
-			priceRange := 0.002
-
-			chartX := float64(chartRect.Min.X) + float64(chartRect.Dx())/2.0
-			chartY := float64(chartRect.Max.Y) - ((pp.Price-minPrice)/priceRange)*float64(chartRect.Dy())
-
-			vector.DrawFilledCircle(screen, float32(chartX), float32(chartY), 3.0*float32(g.deviceScale), color.RGBA{255, 255, 0, 255}, false)
-		} else {
-			message := "No history data yet."
-			messageColor := color.RGBA{150, 150, 150, 255}
-			textWidth, textHeight := text.Measure(message, g.fontFace, -1)
-
-			msgX := float64(chartRect.Min.X) + (float64(chartRect.Dx())-textWidth)/2.0
-			msgY := float64(chartRect.Min.Y) + (float64(chartRect.Dy())-textHeight)/2.0
-
-			esset.DrawText(screen, message, 0, msgX, msgY, g.fontFace, messageColor)
 		}
-	} else {
-		chartPadding := 30.0 * g.deviceScale
-		chartRect := image.Rect(
-			int(chartPadding),
-			int(chartAreaStartY),
-			screenWidth-int(chartPadding),
-			screenHeight-int(chartPadding),
-		)
-		vector.DrawFilledRect(screen, float32(chartRect.Min.X), float32(chartRect.Min.Y), float32(chartRect.Dx()), float32(chartRect.Dy()), color.RGBA{50, 50, 50, 255}, false)
-
-		message := "Click a coin to see chart."
-		messageColor := color.RGBA{150, 150, 150, 255}
-		textWidth, textHeight := text.Measure(message, g.fontFace, -1)
-		msgX := float64(chartRect.Min.X) + (float64(chartRect.Dx())-textWidth)/2.0
-		msgY := float64(chartRect.Min.Y) + (float64(chartRect.Dy())-textHeight)/2.0
-		esset.DrawText(screen, message, 0, msgX, msgY, g.fontFace, messageColor)
 	}
 }
 
@@ -420,34 +529,37 @@ func (g *Game) Update() error {
 		g.updateAllPrices()
 	}
 
-	if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-		mx, my := ebiten.CursorPosition()
+	g.handleTopbarInput()
 
-		physicalStartX := 10.0 * g.deviceScale
-		physicalStartY := 10.0 * g.deviceScale
-		physicalLineHeight := g.physicalLineHeight
+	// Only handle coin selection if no dropdown is active
+	if g.activeDropdown == nil {
+		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			mx, my := ebiten.CursorPosition()
 
-		g.mu.Lock()
-		defer g.mu.Unlock()
+			physicalStartY := g.topbarHeight + (10.0 * g.deviceScale) // Adjust start Y to account for topbar
 
-		for i, coin := range g.coinData {
-			physicalDrawY := physicalStartY + float64(i)*physicalLineHeight
-			physicalDrawX := physicalStartX
+			g.mu.Lock()
+			defer g.mu.Unlock()
 
-			textWidth, textHeight := text.Measure(coin.DisplayStr, g.fontFace, -1)
+			for i, coin := range g.coinData {
+				physicalDrawY := physicalStartY + float64(i)*g.physicalLineHeight
+				physicalDrawX := 10.0 * g.deviceScale
 
-			physicalBounds := image.Rect(
-				int(physicalDrawX),
-				int(physicalDrawY),
-				int(physicalDrawX+textWidth),
-				int(physicalDrawY+textHeight),
-			)
+				textWidth, textHeight := text.Measure(coin.DisplayStr, g.fontFace, -1)
 
-			if mx >= physicalBounds.Min.X && mx < physicalBounds.Max.X &&
-				my >= physicalBounds.Min.Y && my < physicalBounds.Max.Y {
-				g.SelectedCoinIndex = i
-				log.Printf("Clicked on %s (Index %d)", coin.Symbol, i)
-				break
+				physicalBounds := image.Rect(
+					int(physicalDrawX),
+					int(physicalDrawY),
+					int(physicalDrawX+textWidth),
+					int(physicalDrawY+textHeight),
+				)
+
+				if mx >= physicalBounds.Min.X && mx < physicalBounds.Max.X &&
+					my >= physicalBounds.Min.Y && my < physicalBounds.Max.Y {
+					g.SelectedCoinIndex = i
+					log.Printf("Clicked on %s (Index %d)", coin.Symbol, i)
+					break
+				}
 			}
 		}
 	}
@@ -460,7 +572,7 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeigh
 }
 
 func main() {
-	ebiten.SetWindowSize(640, 480)
+	ebiten.SetWindowSize(800, 600) // Increased window size to accommodate topbar
 
 	deviceScale := ebiten.Monitor().DeviceScaleFactor()
 
@@ -492,6 +604,8 @@ func main() {
 		deviceScale:        deviceScale,
 		SelectedCoinIndex:  0,
 	}
+
+	g.initTopbar() // Initialize topbar
 
 	if len(g.coinData) > 0 && g.SelectedCoinIndex == -1 {
 		g.SelectedCoinIndex = 0
