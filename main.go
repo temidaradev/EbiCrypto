@@ -30,7 +30,7 @@ var MyFont []byte
 var client *http.Client
 
 const glyphsToPreload = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:/ ETHUSDTBTCBNBXP"
-const baseFontSize = 12
+const baseFontSize = 4
 
 var apiURL = "https://api.binance.com"
 var updateInterval = 1 * time.Second
@@ -92,6 +92,7 @@ type Game struct {
 }
 
 type Dropdown struct {
+	ID       string
 	Label    string
 	Options  []string
 	IsOpen   bool
@@ -264,7 +265,7 @@ func initCoinData(loadedData AppData) []*CoinInfo {
 }
 
 func (g *Game) initTopbar() {
-	topbarHeight := 38.0 * g.deviceScale
+	topbarHeight := 16.0 * g.deviceScale
 	g.topbarHeight = topbarHeight
 	g.chartType = "line"
 	g.timeline = "1h"
@@ -312,7 +313,7 @@ func (g *Game) initTopbar() {
 }
 
 func (g *Game) drawTopbar(screen *ebiten.Image) {
-	screenWidth, _ := screen.Size()
+	screenWidth, _ := screen.Bounds().Dx(), screen.Bounds().Dy()
 	// Topbar background
 	vector.DrawFilledRect(screen, 0, 0, float32(screenWidth), float32(g.topbarHeight), color.RGBA{28, 28, 28, 255}, false)
 	// Draw dropdowns
@@ -365,7 +366,7 @@ func (g *Game) drawTopbar(screen *ebiten.Image) {
 				}
 			}
 		}
-		esset.DrawText(screen, priceInfo, 0, float64(screenWidth-170), 10, g.fontFace, priceColor)
+		esset.DrawText(screen, priceInfo, 12, float64(screenWidth-170), 10, g.fontFace, priceColor)
 	}
 }
 
@@ -375,9 +376,11 @@ func (g *Game) handleTopbarInput() {
 
 		// Check if clicking on any dropdown
 		for _, dropdown := range g.dropdowns {
-			// Check if clicking dropdown button
-			if mx >= dropdown.Bounds.Min.X && mx < dropdown.Bounds.Max.X &&
-				my >= dropdown.Bounds.Min.Y && my < dropdown.Bounds.Max.Y {
+			mxInBounds := mx >= dropdown.Bounds.Min.X && mx < dropdown.Bounds.Max.X
+			myInButton := my >= dropdown.Bounds.Min.Y && my < dropdown.Bounds.Max.Y
+
+			// Toggle dropdown if clicking the button
+			if mxInBounds && myInButton {
 				dropdown.IsOpen = !dropdown.IsOpen
 				if dropdown.IsOpen {
 					g.activeDropdown = dropdown
@@ -387,23 +390,31 @@ func (g *Game) handleTopbarInput() {
 				return
 			}
 
-			// Check if clicking on open dropdown options
-			if dropdown.IsOpen {
-				optionHeight := int(g.physicalLineHeight)
-				dropdownWidth := dropdown.Bounds.Dx()
-				optionsHeight := optionHeight * len(dropdown.Options)
+			// If dropdown is open, check if clicking an option
+			if dropdown.IsOpen && mxInBounds {
+				optionHeight := int(g.physicalLineHeight + 0.5) // Proper rounding
+				optionsTop := dropdown.Bounds.Max.Y
 
-				if mx >= dropdown.Bounds.Min.X && mx < dropdown.Bounds.Min.X+dropdownWidth &&
-					my >= dropdown.Bounds.Max.Y && my < dropdown.Bounds.Max.Y+optionsHeight {
-					optionIndex := (my - dropdown.Bounds.Max.Y) / optionHeight
+				// Calculate clicked option correctly
+				clickedY := my - optionsTop
+				if clickedY >= 0 {
+					optionIndex := clickedY / optionHeight
 					if optionIndex >= 0 && optionIndex < len(dropdown.Options) {
 						dropdown.Selected = optionIndex
 						if dropdown.OnSelect != nil {
 							dropdown.OnSelect(optionIndex)
 						}
+
+						// Example: if this dropdown is the Coin selector
+						if dropdown.ID == "coinDropdown" { // (assuming you give dropdowns IDs)
+							g.SelectedCoinIndex = optionIndex
+							log.Printf("Selected coin: %s (index %d)", g.coinData[optionIndex].Symbol, optionIndex)
+						}
+
 						dropdown.IsOpen = false
 						g.activeDropdown = nil
 					}
+
 					return
 				}
 			}
