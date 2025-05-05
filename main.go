@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"io"
 	"log"
-	"net/http"
+	"main/internal"
 	"os"
 	"os/signal"
 	"strconv"
@@ -27,14 +26,8 @@ import (
 //go:embed font.ttf
 var MyFont []byte
 
-var client *http.Client
-
 const glyphsToPreload = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:/ ETHUSDTBTCBNBXP"
 const baseFontSize = 4
-
-var apiURL = "https://api.binance.com"
-var updateInterval = 1 * time.Second
-var pricePrecision = 3
 
 var targetSymbols = []string{
 	"ETHUSDT",
@@ -45,8 +38,6 @@ var targetSymbols = []string{
 }
 
 const stateFilename = "crypto_app_state.json"
-
-var historyGapThreshold = updateInterval * 10
 
 type PricePoint struct {
 	Price     float64   `json:"price"`
@@ -65,11 +56,6 @@ type CoinInfo struct {
 
 type AppData struct {
 	CoinData []*CoinInfo `json:"coin_data"`
-}
-
-type Response struct {
-	Symbol string `json:"symbol"`
-	Price  string `json:"price"`
 }
 
 type Game struct {
@@ -101,12 +87,6 @@ type Dropdown struct {
 	OnSelect func(int)
 }
 
-func init() {
-	client = &http.Client{
-		Timeout: 1 * time.Second,
-	}
-}
-
 func (g *Game) initSolidColorImage() {
 	if g.solidColorImage == nil {
 		g.solidColorImage = ebiten.NewImage(1, 1)
@@ -114,39 +94,10 @@ func (g *Game) initSolidColorImage() {
 	}
 }
 
-func getPrice(symbol string) (string, error) {
-	resp, err := client.Get(fmt.Sprintf("%s/api/v3/ticker/price?symbol=%s", apiURL, symbol))
-	if err != nil {
-		return "", fmt.Errorf("HTTP request failed [%s]: %w", symbol, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("API error [%s]: %s - %s", symbol, resp.Status, string(bodyBytes))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("body read error [%s]: %w", symbol, err)
-	}
-
-	var priceResp Response
-	if err := json.Unmarshal(body, &priceResp); err != nil {
-		return "", fmt.Errorf("JSON parse error [%s]: %w, Received Data: %s", symbol, err, string(body))
-	}
-
-	if _, err := strconv.ParseFloat(priceResp.Price, 64); err != nil {
-		return "", fmt.Errorf("invalid price format [%s]: %w, Received Price: %s", symbol, err, priceResp.Price)
-	}
-
-	return priceResp.Price, nil
-}
-
 func (g *Game) updateSingleCoin(coin *CoinInfo) {
 	defer g.wg.Done()
 
-	newPriceStr, err := getPrice(coin.Symbol)
+	newPriceStr, err := internal.GetPrice(coin.Symbol)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -172,7 +123,7 @@ func (g *Game) updateSingleCoin(coin *CoinInfo) {
 	coin.LastPrice = newPriceStr
 	coin.FetchError = nil
 
-	format := fmt.Sprintf("%%s: %%.%df", pricePrecision)
+	format := fmt.Sprintf("%%s: %%.%df", internal.PricePrecision)
 	coin.DisplayStr = fmt.Sprintf(format, coin.Symbol, newPriceFloat)
 
 	coin.PriceHistory = append(coin.PriceHistory, PricePoint{Price: newPriceFloat, Timestamp: time.Now()})
@@ -237,7 +188,7 @@ func initCoinData(loadedData AppData) []*CoinInfo {
 			if coin.LastPrice != "" {
 				p, err := strconv.ParseFloat(coin.LastPrice, 64)
 				if err == nil {
-					format := fmt.Sprintf("%%s: %%.%df", pricePrecision)
+					format := fmt.Sprintf("%%s: %%.%df", internal.PricePrecision)
 					coin.DisplayStr = fmt.Sprintf(format, coin.Symbol, p)
 				} else {
 					coin.DisplayStr = fmt.Sprintf("%s: Parse Error", coin.Symbol)
@@ -535,7 +486,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func (g *Game) Update() error {
-	if time.Since(g.lastUpdateTime) >= updateInterval {
+	if time.Since(g.lastUpdateTime) >= internal.UpdateInterval {
 		g.lastUpdateTime = time.Now()
 		g.updateAllPrices()
 	}
@@ -609,7 +560,7 @@ func main() {
 
 	g := &Game{
 		coinData:           initCoinData(loadedData),
-		lastUpdateTime:     time.Now().Add(-updateInterval),
+		lastUpdateTime:     time.Now().Add(-internal.UpdateInterval),
 		fontFace:           fontFace,
 		physicalLineHeight: physicalLineHeight,
 		deviceScale:        deviceScale,
