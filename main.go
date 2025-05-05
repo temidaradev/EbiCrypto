@@ -29,37 +29,14 @@ var MyFont []byte
 const glyphsToPreload = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:/ ETHUSDTBTCBNBXP"
 const baseFontSize = 4
 
-var targetSymbols = []string{
-	"ETHUSDT",
-	"BTCUSDT",
-	"BNBUSDT",
-	"SOLUSDT",
-	"XRPUSDT",
-}
-
 const stateFilename = "crypto_app_state.json"
 
-type PricePoint struct {
-	Price     float64   `json:"price"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-type CoinInfo struct {
-	Symbol        string       `json:"symbol"`
-	LastPrice     string       `json:"last_price"`
-	PreviousPrice string       `json:"previous_price"`
-	PriceHistory  []PricePoint `json:"price_history"`
-	DisplayStr    string       `json:"-"`
-	FetchError    error        `json:"-"`
-	IsLoading     bool         `json:"-"`
-}
-
 type AppData struct {
-	CoinData []*CoinInfo `json:"coin_data"`
+	CoinData []*internal.CoinInfo `json:"coin_data"`
 }
 
 type Game struct {
-	coinData           []*CoinInfo
+	coinData           []*internal.CoinInfo
 	lastUpdateTime     time.Time
 	mu                 sync.Mutex
 	wg                 sync.WaitGroup
@@ -94,7 +71,7 @@ func (g *Game) initSolidColorImage() {
 	}
 }
 
-func (g *Game) updateSingleCoin(coin *CoinInfo) {
+func (g *Game) updateSingleCoin(coin *internal.CoinInfo) {
 	defer g.wg.Done()
 
 	newPriceStr, err := internal.GetPrice(coin.Symbol)
@@ -126,7 +103,7 @@ func (g *Game) updateSingleCoin(coin *CoinInfo) {
 	format := fmt.Sprintf("%%s: %%.%df", internal.PricePrecision)
 	coin.DisplayStr = fmt.Sprintf(format, coin.Symbol, newPriceFloat)
 
-	coin.PriceHistory = append(coin.PriceHistory, PricePoint{Price: newPriceFloat, Timestamp: time.Now()})
+	coin.PriceHistory = append(coin.PriceHistory, internal.PricePoint{Price: newPriceFloat, Timestamp: time.Now()})
 }
 
 func (g *Game) updateAllPrices() {
@@ -178,12 +155,12 @@ func loadData(filename string) (AppData, error) {
 	return data, nil
 }
 
-func initCoinData(loadedData AppData) []*CoinInfo {
+func initCoinData(loadedData AppData) []*internal.CoinInfo {
 	if len(loadedData.CoinData) > 0 {
 		log.Println("Initializing coin data from loaded state.")
 		for _, coin := range loadedData.CoinData {
 			if coin.PriceHistory == nil {
-				coin.PriceHistory = []PricePoint{}
+				coin.PriceHistory = []internal.PricePoint{}
 			}
 			if coin.LastPrice != "" {
 				p, err := strconv.ParseFloat(coin.LastPrice, 64)
@@ -202,13 +179,13 @@ func initCoinData(loadedData AppData) []*CoinInfo {
 		return loadedData.CoinData
 	} else {
 		log.Println("Initializing coin data from scratch.")
-		coinData := make([]*CoinInfo, len(targetSymbols))
-		for i, symbol := range targetSymbols {
-			coinData[i] = &CoinInfo{
+		coinData := make([]*internal.CoinInfo, len(internal.TargetSymbols))
+		for i, symbol := range internal.TargetSymbols {
+			coinData[i] = &internal.CoinInfo{
 				Symbol:       symbol,
 				DisplayStr:   fmt.Sprintf("%s: Loading...", symbol),
 				IsLoading:    true,
-				PriceHistory: []PricePoint{},
+				PriceHistory: []internal.PricePoint{},
 			}
 		}
 		return coinData
@@ -228,7 +205,7 @@ func (g *Game) initTopbar() {
 	g.dropdowns = []*Dropdown{
 		{
 			Label:   "Crypto",
-			Options: targetSymbols,
+			Options: internal.TargetSymbols,
 			Bounds:  image.Rect(margin, 5, margin+btnW, 5+btnH),
 			OnSelect: func(index int) {
 				g.mu.Lock()
